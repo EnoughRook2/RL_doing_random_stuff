@@ -1,7 +1,4 @@
 import gymnasium as gym
-from functorch.dim import dims
-from mypy.plugins.dataclasses import dataclass_class_maker_callback
-
 from lib_pong import dqn_model
 from lib_pong import wrappers
 from dataclasses import dataclass
@@ -93,18 +90,86 @@ class Agent:
             self._reset()
         return done_reward
 
-    def batch_to_tensors(batch: tt.List[Experience],device: torch.device)->BatchTensors:
-        states,actions,rewards,dones,new_states=[],[],[],[],[]
-        for e in batch:
-            states.append(e.state)
-            actions.append(e.action)
-            rewards.append(e.reward)
-            dones.append(e.done_trunc)
-            new_states.append(e.new_state)
-        states_t=torch.as_tensor(np.asarray(states))
-        actions_t= torch.LongTensor(actions)
-        rewards_t= torch.FloatTensor(rewards)
-        dones_t= torch.BoolTensor(dones)
-        new_states_t=torch.as_tensor(np.asarray(new_states))
-        return states_t.to(device), actions_t.to(device), rewards_t.to(device), dones_t.to(device), new_states_t.to(device)
-    
+def batch_to_tensors(batch: tt.List[Experience],device: torch.device)->BatchTensors:
+    states,actions,rewards,dones,new_states=[],[],[],[],[]
+    for e in batch:
+        states.append(e.state)
+        actions.append(e.action)
+        rewards.append(e.reward)
+        dones.append(e.done_trunc)
+        new_states.append(e.new_state)
+    states_t=torch.as_tensor(np.asarray(states))
+    actions_t= torch.LongTensor(actions)
+    rewards_t= torch.FloatTensor(rewards)
+    dones_t= torch.BoolTensor(dones)
+    new_states_t=torch.as_tensor(np.asarray(new_states))
+    return states_t.to(device), actions_t.to(device), rewards_t.to(device), dones_t.to(device), new_states_t.to(device)
+
+def calc_loss(batch: tt.List[Experience], net: dqn_model.DQN, target_net: dqn_model.DQN,device: torch.device)-> torch.Tensor:
+    states_t,actions_t,rewards_t,dones_t,new_state_t=batch_to_tensors(batch,device)
+    state_action_values= net(states_t).gather(1,actions_t.unsqueeze(-1)).squeeze(-1)
+    with torch.no_grad():
+        next_state_values=target_net(new_state_t).max(1)[0]
+        next_state_values[dones_t] = 0.0
+        next_state_values= next_state_values.detach()
+    expected_state_action_values = next_state_values * GAMMA + rewards_t
+    return nn.MSELoss()(state_action_values, expected_state_action_values)
+
+if __name__=="__main__":
+    parser=argparse.ArgumentParser()
+    parser.add_argument("--dev",default="cpu",help="Device name, default is cpu")
+    parser.add_argument("--env",default=DEFAULT_ENV_NAME,help="Environment name, default= " + DEFAULT_ENV_NAME)
+    args=parser.parse_args()
+    device=torch.device("mps")
+    env=wrappers.make_env(args.env)
+    net=dqn_model.DQN(env.observation_space.shape,env.action_space.n).to(device)
+    target_net = dqn_model.DQN(env.observation_space.shape, env.action_space.n).to(device)
+    writer=SummaryWriter(comment="-dqn_pong")
+    print(net)
+    buffer=ExperienceBuffer(REPLAY_SIZE)
+    agent=Agent(env,buffer)
+    epsilon=EPSILON_START
+    optimizer=optim.Adam(net.parameters(),lr=LEARNING_RATE)
+    total_rewards=[]
+    frame_idx=0
+    ts_frame=0
+    ts=time.time()
+    best_m_reward=None
+    while True:
+        frame_idx+=1
+        epsilon=max(EPSILON_FINAL,EPSILON_START-frame_idx/EPSILON_DECAY_LAST_FRAME)
+        reward=agent.play_step(net,device,epsilon)
+        if reward is not None:
+            total_rewards.append(reward)
+            speed= (frame_idx-ts_frame)/(time.time()-ts)
+            ts_frame=frame_idx
+            ts=time.time()
+            m_reward=np.mean(total_rewards[-100:])
+            print(f"{frame_idx}: done {len(total_rewards)} games, reward {m_reward:.3f}, "
+                  f"eps {epsilon:.2f}, speed {speed:.2f} f/s")
+            writer.add_scalar("epsilon", epsilon, frame_idx)
+            writer.add_scalar("speed", speed, frame_idx)
+            writer.add_scalar("reward_100", m_reward, frame_idx)
+            writer.add_scalar("reward", reward, frame_idx)
+
+            if best_m_reward is None or best_m_reward < m_reward:
+                torch.save(net.state_dict(), args.env+"-best_%.0f.dat"%m_reward)
+                if best_m_reward is not None:
+                    print(f"Best reward updated {best_m_reward:.3f} -> {m_reward:.3f}")
+                best_m_reward=m_reward
+
+            if m_reward > MEAN_REWARD_BOUND:
+                print("Solved in %d frames!" % frame_idx)
+                break
+        if (len(buffer)<REPLAY_START_SIZE):
+            continue
+        if frame_idx % SYNC_TARGET_FRAMES == 0:
+            target_net.load_state_dict(net.state_dict())
+        optimizer.zero_grad()
+        batch=buffer.sample(BATCH_SIZE)
+        loss_t=calc_loss(batch,net,target_net,device)
+        loss_t.backward()
+        optimizer.step()
+    writer.close()
+    env.close()
+    agent.env.close()
