@@ -63,7 +63,7 @@ class Agent:
         self.total_reward=0.0
 
     @torch.no_grad()
-    def play_step(self,net:dqn_model.DQN,device: torch.device, epsilon: float|int=0.0)-> tt.Optional[float|int]:
+    def play_step(self, net: dqn_model.DQN, device: torch.device, epsilon: float | int=0.0)-> tt.Optional[float | int]:
         done_reward= None
         if np.random.random() < epsilon:
             action=self.env.action_space.sample()
@@ -105,7 +105,7 @@ def batch_to_tensors(batch: tt.List[Experience],device: torch.device)->BatchTens
     new_states_t=torch.as_tensor(np.asarray(new_states))
     return states_t.to(device), actions_t.to(device), rewards_t.to(device), dones_t.to(device), new_states_t.to(device)
 
-def calc_loss(batch: tt.List[Experience], net: dqn_model.DQN, target_net: dqn_model.DQN,device: torch.device)-> torch.Tensor:
+def calc_loss(batch: tt.List[Experience], net: dqn_model.DQN, target_net: dqn_model.DQN, device: torch.device)-> torch.Tensor:
     states_t,actions_t,rewards_t,dones_t,new_state_t=batch_to_tensors(batch,device)
     state_action_values= net(states_t).gather(1,actions_t.unsqueeze(-1)).squeeze(-1)
     with torch.no_grad():
@@ -121,8 +121,8 @@ if __name__=="__main__":
     parser.add_argument("--env",default=DEFAULT_ENV_NAME,help="Environment name, default= " + DEFAULT_ENV_NAME)
     args=parser.parse_args()
     device=torch.device("mps")
-    env=wrappers.make_env(args.env)
-    net=dqn_model.DQN(env.observation_space.shape,env.action_space.n).to(device)
+    env= wrappers.make_env(args.env)
+    net= dqn_model.DQN(env.observation_space.shape, env.action_space.n).to(device)
     target_net = dqn_model.DQN(env.observation_space.shape, env.action_space.n).to(device)
     writer=SummaryWriter(comment="-dqn_pong")
     print(net)
